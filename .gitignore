@@ -8,3 +8,12 @@
 /.idea/stat project.iml
 /.idea/vcs.xml
 /.raw data/BPFeatureToMetadata.dbf
+/raw data/Trans_AirportPoint.dbf
+/raw data/Trans_AirportPoint.prj
+/raw data/Trans_AirportPoint.shx
+/raw data/Trans_RoadSegment_0.dbf
+/raw data/Trans_RoadSegment_0.prj
+/raw data/Trans_RoadSegment_0.shx
+/raw data/Trans_RoadSegment_1.dbf
+/raw data/Trans_RoadSegment_1.prj
+/raw data/Trans_RoadSegment_1.shx
