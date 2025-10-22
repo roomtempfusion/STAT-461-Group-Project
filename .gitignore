@@ -17,3 +17,6 @@
 /raw data/Trans_RoadSegment_1.dbf
 /raw data/Trans_RoadSegment_1.prj
 /raw data/Trans_RoadSegment_1.shx
+.DS_Store
+__pycache__/
+.ipynb_checkpoints/
