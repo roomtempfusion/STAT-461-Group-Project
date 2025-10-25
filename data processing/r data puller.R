@@ -9,6 +9,7 @@ library(lubridate)
 library(ggplot2)
 library(purrr)
 library(here)
+library(readxl)
 authenticateUser()
 
 alpha_lineages = lookupSublineages("Alpha", returnQueryString = TRUE)
@@ -19,13 +20,14 @@ omicron_lineages = lookupSublineages("Omicron", returnQueryString = TRUE)
 beta_lineages = lookupSublineages("Beta", returnQueryString = TRUE)
 gamma_lineages = lookupSublineages("Gamma", returnQueryString = TRUE)
 
-who_labels = c("Alpha", "Epsilon", "Iota", "Delta")
-names(who_labels) = c(alpha_lineages, epsilon_lineages, iota_lineages, delta_lineages)
+# who_labels = c("Alpha", "Epsilon", "Iota", "Delta")
+# names(who_labels) = c(alpha_lineages, epsilon_lineages, iota_lineages, delta_lineages)
 
-il_counties = read.csv('../raw data/il_counties.csv')
+# il_counties = read.csv('../raw data/il_counties.csv')
+# 
+# il_county_names = paste0("USA_US-IL_", il_counties$county)
 
-il_county_names = paste0("USA_US-IL_", il_counties$county)
-
+state_names = read_excel('../raw data/state level data/r script state codes.xlsx')
 splt = unlist(strsplit(omicron_lineages, 'OR')) # get a vector of all variants under omicron umbrella
 
 omicron_1 = paste(splt[1:500], collapse = "OR")
@@ -104,7 +106,7 @@ getGenomicData_alt <- function(query_url, location=NULL, cumulative=NULL, pangol
   return(hits)
 }
 
-z = getGenomicData_alt(query_url="prevalence-by-location", location="USA_US-IL_17031", pangolin_lineage = "B.1.1.7")
+z = getGenomicData_alt(query_url="prevalence-by-location", location=c("USA_US-CA", "USA_US-IL"), pangolin_lineage = "B.1.1.7")
 
 # Alternative version of prevalence call that doesn't process location names into ISO codes, instead directly takes ISO codes
 getPrevalence_alt <- function(pangolin_lineage=NULL, location=NULL, mutations=NULL, cumulative=FALSE, logInfo=TRUE){
@@ -134,41 +136,40 @@ getPrevalence_alt <- function(pangolin_lineage=NULL, location=NULL, mutations=NU
   return(df)
 }
 
-getPrevalence_alt(omicron_2, location=county)
-var = 1
-results_2 = data.frame()
-for (county in il_county_names){
-  for (omicron_var in c(omicron_1, omicron_2, omicron_3, omicron_4, omicron_5)){
-    res = getPrevalence_alt(
-      pangolin_lineage = omicron_var, location = county)
-    results_2 = rbind(results_2, res)
-    print(c(county, var))
-    var = var + 1
-    if (var > 5){
-      var == 1
-    }
-    }
-  }
+z = getPrevalence_alt(pangolin_lineage="B.1.1.7", location="USA_US-CA")
 
 results = data.frame()
-for (county in il_county_names){
-  for (variant in c(beta_lineages, gamma_lineages)){
+for (state in state_names$codes){
+  print(state)
+  res = getPrevalence_alt(
+    pangolin_lineage = c(alpha_lineages, beta_lineages, 
+                         delta_lineages, epsilon_lineages, 
+                         gamma_lineages, iota_lineages), 
+    location = state
+  )
+  print(length(res))
+  results = rbind(results, res)
+  
+}
+unique(results$location)
+
+results_2 = data.frame()
+for (state in state_names$codes){
+  print(state)
+  for (omicron_var in c(omicron_1, omicron_2, omicron_3, omicron_4, omicron_5)){
     res = getPrevalence_alt(
-      pangolin_lineage = variant, location = county)
-    results = rbind(results, res)
+      pangolin_lineage = omicron_var, location = state)
+    results_2 = rbind(results_2, res)
+    }
   }
-}
 
 
-for (county in il_county_names){
-  print(county)
-}
-# results$lineage[results$lineage == alpha_lineages] = 'Alpha'
-# results$lineage[results$lineage == delta_lineages] = 'Delta'
-# results$lineage[results$lineage == epsilon_lineages] = 'Epsilon'
-# results$lineage[results$lineage == iota_lineages] = 'Iota'
 
+results$lineage[results$lineage == alpha_lineages] = 'Alpha'
 results$lineage[results$lineage == beta_lineages] = 'Beta'
+results$lineage[results$lineage == delta_lineages] = 'Delta'
+results$lineage[results$lineage == epsilon_lineages] = 'Epsilon'
+results$lineage[results$lineage == iota_lineages] = 'Iota'
 results$lineage[results$lineage == gamma_lineages] = 'Gamma'
 
 results_2$lineage[grepl("B.1.1.529", results_2$lineage)] = 'omicron_1'
@@ -178,7 +179,9 @@ results_2$lineage[grepl("LF.10", results_2$lineage)] = 'omicron_4'
 results_2$lineage[grepl("PE.1.3", results_2$lineage)] = 'omicron_5'
 
 unique(results$lineage)
+unique(results_2$lineage)
 
-write.csv(results, 'variant_prevalence_2_il.csv', row.names =FALSE)
+combined = rbind(results, results_2)
+write.csv(combined, 'variant_prevalence_state_level.csv', row.names =FALSE)
 
 
