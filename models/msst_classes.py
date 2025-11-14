@@ -138,28 +138,33 @@ class EpidemicDataset(Dataset):
         return self.num_samples
 
     def __getitem__(self, idx):
-        t0 = idx
-        t_in_end = t0 + self.input_len
-        t_out_end = t_in_end + self.horizon
+        # 1) Inputs
+        X_state_seq = self.X_state[idx: idx + self.input_len]  # (T_in, S, F)
+        X_county_seq = self.X_county[idx: idx + self.input_len]  # (T_in, M, F_micro)
 
-        # Inputs
-        X_state_seq = self.X_state[t0:t_in_end]      # (T_in, S, F_macro)
-        X_county_seq = self.X_county[t0:t_in_end]    # (T_in, M, F_micro)
+        # 2) Raw future targets
+        t_start = idx + self.input_len
+        t_end = t_start + self.horizon  # not inclusive
+        Y_future = self.X_state[t_start:t_end, :, :]  # (H, S, F)
+        Y_future = Y_future[:, :, self.target_variant_indices]  # (H, S, V)
+        y_raw = np.transpose(Y_future, (1, 0, 2))  # (S, H, V)
 
-        # Future targets from state data
-        # (horizon, S, F_macro)
-        y_window = self.X_state[t_in_end:t_out_end]
+        # 3) Baseline (e.g., 7-day MA of last K days in input)
+        # Use last K days of the input window
+        K = min(7, self.input_len)
+        last_k = X_state_seq[-K:, :, :]  # (K, S, F)
+        last_k_cases = last_k[:, :, self.target_variant_indices]  # (K, S, V)
+        baseline = last_k_cases.mean(axis=0)  # (S, V)
+        baseline_full = np.repeat(baseline[:, None, :], self.horizon, axis=1)  # (S, H, V)
 
-        # Only variant dims: (horizon, S, v_out)
-        y_window = y_window[:, :, self.target_variant_indices]
-
-        # Model predicts (S, horizon, v_out), so transpose
-        y_true = np.transpose(y_window, (1, 0, 2))
+        # 4) Residual target
+        y_resid = y_raw - baseline_full
 
         return (
-            torch.from_numpy(X_state_seq),    # (T_in, S, F_macro)
-            torch.from_numpy(X_county_seq),   # (T_in, M, F_micro)
-            torch.from_numpy(y_true),         # (S, horizon, v_out)
+            torch.from_numpy(X_state_seq).float(),
+            torch.from_numpy(X_county_seq).float(),
+            torch.from_numpy(y_resid).float(),
+            torch.from_numpy(baseline_full).float(),  # needed at eval to reconstruct
         )
 
 
@@ -180,3 +185,124 @@ class GRUOnly(nn.Module):
         H_last = H[-1]                     # (S, hidden_gru)
         out = self.head(H_last)            # (S, horizon*v_out)
         return out.view(H_last.size(0), self.horizon, self.v_out)
+
+
+class MacroGCNGRUResidualSkip(nn.Module):
+    def __init__(self, macro_gcn, in_dim, gcn_out_dim, hidden_gru, horizon, v_out):
+        super().__init__()
+        self.macro_gcn = macro_gcn
+        self.in_dim = in_dim
+        self.gcn_out_dim = gcn_out_dim
+
+        # GRU sees [raw features, GCN emb]
+        self.gru = nn.GRU(
+            input_size=in_dim + gcn_out_dim,
+            hidden_size=hidden_gru,
+            batch_first=False  # (T, S, d)
+        )
+
+        self.head = nn.Sequential(
+            nn.Linear(hidden_gru, hidden_gru),
+            nn.ReLU(),
+            nn.Linear(hidden_gru, horizon * v_out),
+        )
+
+        self.horizon = horizon
+        self.v_out = v_out
+
+    def forward(self, X_state_seq, X_county_seq=None):
+        # X_state_seq: (T_in, S, F_macro)
+        T_in, S, F_macro = X_state_seq.shape
+
+        fused_list = []
+        for t in range(T_in):
+            x_t = X_state_seq[t]             # (S, F_macro)
+            g_t = self.macro_gcn(x_t)       # (S, gcn_out_dim)
+            fused_t = torch.cat([x_t, g_t], dim=-1)  # (S, F_macro + gcn_out_dim)
+            fused_list.append(fused_t)
+
+        H_seq = torch.stack(fused_list, dim=0)      # (T_in, S, F_macro + gcn_out_dim)
+        H_out, _ = self.gru(H_seq)                  # (T_in, S, hidden_gru)
+        H_last = H_out[-1]                          # (S, hidden_gru)
+
+        out = self.head(H_last)                     # (S, horizon*v_out)
+        return out.view(S, self.horizon, self.v_out)
+
+
+class MacroMicroGCNGRUResidual(nn.Module):
+    def __init__(
+        self,
+        macro_gcn,         # instance of MacroGCN
+        micro_gcn,         # instance of MicroGCN (your class)
+        in_dim_state,      # F_macro: #variant features per state
+        macro_out_dim,     # out_dim of MacroGCN
+        micro_out_dim,     # out_dim of MicroGCN
+        hidden_gru,
+        horizon,
+        v_out,
+    ):
+        super().__init__()
+        self.macro_gcn = macro_gcn
+        self.micro_gcn = micro_gcn
+
+        self.in_dim_state = in_dim_state
+        self.macro_out_dim = macro_out_dim
+        self.micro_out_dim = micro_out_dim
+
+        # GRU sees: [raw state features, macro emb, micro emb]
+        gru_input_dim = in_dim_state + macro_out_dim + micro_out_dim
+
+        self.gru = nn.GRU(
+            input_size=gru_input_dim,
+            hidden_size=hidden_gru,
+            batch_first=False  # (T, S, d)
+        )
+
+        self.head = nn.Sequential(
+            nn.Linear(hidden_gru, hidden_gru),
+            nn.ReLU(),
+            nn.Linear(hidden_gru, horizon * v_out),
+        )
+
+        self.horizon = horizon
+        self.v_out = v_out
+
+    def forward(self, X_state_seq, X_county_seq):
+        """
+        X_state_seq:  (T_in, S, F_macro)
+        X_county_seq: (T_in, M, F_micro)
+          - MicroGCN.forward expects x_county_t: (M, F_micro)
+          - and returns state-level pooled: (S, micro_out_dim)
+        """
+        T_in, S, F_macro = X_state_seq.shape
+        _, M, F_micro = X_county_seq.shape
+
+        fused_list = []
+
+        for t in range(T_in):
+            # State block at time t
+            x_state_t = X_state_seq[t]                # (S, F_macro)
+            h_macro_t = self.macro_gcn(x_state_t)     # (S, macro_out_dim)
+
+            # County block at time t
+            x_county_t = X_county_seq[t]              # (M, F_micro)
+            h_micro_t = self.micro_gcn(x_county_t)    # (S, micro_out_dim) pooled to states
+
+            # Sanity: ensure MicroGCN returns same #states
+            # (optional, but nice while debugging)
+            # assert h_micro_t.shape[0] == S
+
+            # Fuse raw + macro + micro
+            h_fused_t = torch.cat(
+                [x_state_t, h_macro_t, h_micro_t],
+                dim=-1
+            )  # (S, F_macro + macro_out_dim + micro_out_dim)
+
+            fused_list.append(h_fused_t)
+
+        H_seq = torch.stack(fused_list, dim=0)        # (T_in, S, gru_input_dim)
+        H_out, _ = self.gru(H_seq)                    # (T_in, S, hidden_gru)
+        H_last = H_out[-1]                            # (S, hidden_gru)
+
+        out = self.head(H_last)                       # (S, horizon * v_out)
+        return out.view(S, self.horizon, self.v_out)  # residuals (S, H, V)
